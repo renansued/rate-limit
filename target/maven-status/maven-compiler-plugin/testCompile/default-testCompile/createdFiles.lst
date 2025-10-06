@@ -1,2 +1,4 @@
 com/codurance/limiter/DistributedHighThroughputRateLimiterTest.class
 com/codurance/store/MockDistributedKeyValueStore.class
+com/codurance/limiter/metrics/CloudWatchMetricPublisherTest.class
+com/codurance/limiter/metrics/PrometheusMetricPublisherTest.class

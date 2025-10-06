@@ -1,7 +1,7 @@
 package com.codurance.limiter.metrics;
 
 /**
- * No-op metric publisher (default) so limiter can run without CloudWatch dependency.
+ * Hack - No-op metric publisher (default) so limiter can run without CloudWatch dependency.
  */
 public class NoOpMetricPublisher implements MetricPublisher {
     @Override public void incrementCounter(String name, long delta) {}

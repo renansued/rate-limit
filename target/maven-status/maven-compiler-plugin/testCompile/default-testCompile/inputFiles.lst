@@ -1,2 +1,4 @@
+/home/rcastro/pessoal/Condurance_project/src/test/java/com/codurance/limiter/metrics/PrometheusMetricPublisherTest.java
 /home/rcastro/pessoal/Condurance_project/src/test/java/com/codurance/store/MockDistributedKeyValueStore.java
+/home/rcastro/pessoal/Condurance_project/src/test/java/com/codurance/limiter/metrics/CloudWatchMetricPublisherTest.java
 /home/rcastro/pessoal/Condurance_project/src/test/java/com/codurance/limiter/DistributedHighThroughputRateLimiterTest.java

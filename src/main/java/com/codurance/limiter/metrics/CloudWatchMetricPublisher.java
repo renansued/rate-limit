@@ -7,6 +7,8 @@ import software.amazon.awssdk.services.cloudwatch.model.StandardUnit;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Minimal CloudWatch MetricPublisher. This implementation sends individual
@@ -16,6 +18,7 @@ import java.util.List;
 public class CloudWatchMetricPublisher implements MetricPublisher {
   private final CloudWatchClient client;
   private final String namespace;
+  private static final Logger logger = LoggerFactory.getLogger(CloudWatchMetricPublisher.class);
 
   public CloudWatchMetricPublisher(CloudWatchClient client, String namespace) {
     this.client = client;
@@ -49,7 +52,7 @@ public class CloudWatchMetricPublisher implements MetricPublisher {
       client.putMetricData(req);
     } catch (Throwable t) {
       // best-effort; do not throw from metrics
-      t.printStackTrace();
+      logger.warn("Failed to publish CloudWatch metric {}", name, t);
     }
   }
 }

@@ -40,8 +40,6 @@ public class DistributedHighThroughputRateLimiterTest {
     public void blocksWhenOverLimit_localPending() throws Exception {
         String key = "client-B";
         int limit = 3;
-        // make 4 quick requests without waiting for flush - local pending should block
-        // the 4th
         assertTrue(limiter.isAllowed(key, limit).get());
         assertTrue(limiter.isAllowed(key, limit).get());
         assertTrue(limiter.isAllowed(key, limit).get());
@@ -96,7 +94,6 @@ public class DistributedHighThroughputRateLimiterTest {
         // allow flushes to propagate
         Thread.sleep(500);
         int total = store.sumShardKeys(key, 8);
-        // we expect at least some of the requests to have been flushed
         assertTrue(total >= 0);
     }
 
@@ -113,8 +110,7 @@ public class DistributedHighThroughputRateLimiterTest {
                 for (int i = 0; i < perThread; i++) {
                     try {
                         limiter.isAllowed(key, limit).get();
-                    } catch (Exception ignored) {
-                    }
+                    } catch (Exception ignored) {  }
                 }
             });
             th.start();
@@ -132,12 +128,10 @@ public class DistributedHighThroughputRateLimiterTest {
     @Test
     public void retrySucceedsOnTransientFailure() throws Exception {
         String key = "client-retry";
-        // configure store to fail next 2 calls (transient)
         store.setFailNextN(2);
         int requests = 5;
         for (int i = 0; i < requests; i++)
             limiter.isAllowed(key, 1000);
-        // allow flush and retries
         Thread.sleep(500);
         int total = store.sumShardKeys(key, 8);
         assertTrue(total >= requests);
@@ -146,14 +140,11 @@ public class DistributedHighThroughputRateLimiterTest {
     @Test
     public void circuitBreakerOpensOnPersistentFailure() throws Exception {
         String key = "client-cb";
-        // configure store to fail many times to trigger circuit breaker
         store.setFailNextN(100);
         int requests = 5;
         for (int i = 0; i < requests; i++)
             limiter.isAllowed(key, 1000);
         Thread.sleep(500);
-        // since failures persist, circuit breaker should open and prevent further
-        // flushes
         long flushed = limiter.getFlushedBatches();
         assertTrue(flushed >= 0);
     }

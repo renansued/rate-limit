@@ -16,6 +16,10 @@ import com.codurance.limiter.reliability.RetryPolicy;
 import com.codurance.limiter.reliability.CircuitBreaker;
 import com.codurance.limiter.metrics.MetricPublisher;
 import com.codurance.limiter.metrics.NoOpMetricPublisher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import com.codurance.limiter.metrics.MetricPublisher;
+import com.codurance.limiter.metrics.NoOpMetricPublisher;
 
 /**
  * Distributed high-throughput rate limiter (sharded counters + batching).
@@ -40,6 +44,7 @@ import com.codurance.limiter.metrics.NoOpMetricPublisher;
  * implementation.
  */
 public class DistributedHighThroughputRateLimiter implements AutoCloseable {
+  private static final Logger logger = LoggerFactory.getLogger(DistributedHighThroughputRateLimiter.class);
   private final DistributedKeyValueStore store;
   private final ScheduledExecutorService scheduler;
   private final long flushIntervalMs;
@@ -63,9 +68,9 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
     this.flushIntervalMs = builder.flushIntervalMs;
     this.shards = builder.shards;
     this.expirationSeconds = builder.expirationSeconds;
-  this.retryPolicy = builder.retryPolicy;
-  this.circuitBreaker = builder.circuitBreaker;
-  this.metricPublisher = builder.metricPublisher == null ? new NoOpMetricPublisher() : builder.metricPublisher;
+    this.retryPolicy = builder.retryPolicy;
+    this.circuitBreaker = builder.circuitBreaker;
+    this.metricPublisher = builder.metricPublisher == null ? new NoOpMetricPublisher() : builder.metricPublisher;
 
     this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
       Thread t = new Thread(r, "rate-limiter-flusher");
@@ -88,10 +93,8 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
   /**
    * Check whether a request is allowed under limit for the given logical key.
    * This method is non-blocking and returns immediately with a CompletableFuture
-   * containing
-   * the decision. It increments a local pending counter for a randomly chosen
-   * shard to
-   * distribute load.
+   * containing the decision. It increments a local pending counter for a randomly chosen
+   * shard to distribute load.
    */
   public CompletableFuture<Boolean> isAllowed(String key, int limit) {
     Objects.requireNonNull(key, "logicalKey");
@@ -132,7 +135,7 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
     try {
       flushAll();
     } catch (Throwable t) {
-      t.printStackTrace();
+      logger.warn("Error while flushing metrics", t);
     }
   }
 
@@ -299,7 +302,7 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
       flushAllSync();
     } catch (Throwable t) {
       // best-effort
-      t.printStackTrace();
+      logger.warn("Error during final synchronous flush", t);
     }
 
     scheduler.awaitTermination(1, TimeUnit.SECONDS);
@@ -315,7 +318,7 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
     private RetryPolicy retryPolicy = null;
     private CircuitBreaker circuitBreaker = null;
     private int workerPoolSize = 8;
-  private MetricPublisher metricPublisher = null;
+    private MetricPublisher metricPublisher = null;
 
     public Builder(DistributedKeyValueStore store) {
       this.store = store;

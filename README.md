@@ -4,18 +4,6 @@ This repository contains a Java implementation of a distributed, high-throughput
 rate limiter designed to run across a fleet of servers and to use an external
 `DistributedKeyValueStore` (provided as an interface) to keep global counts.
 
-The README below is bilingual: Português (PT-BR) followed by English (EN).
-
-## Português (PT-BR)
-
-Resumo rápido
-- Classe principal: `com.codurance.limiter.DistributedHighThroughputRateLimiter`.
-- Abstração do storage: `com.codurance.store.DistributedKeyValueStore` (método esperado
-  `CompletableFuture<Integer> incrementByAndExpire(String key, int delta, int expirationSeconds) throws Exception`).
-- Mock de testes: `com.codurance.store.MockDistributedKeyValueStore`.
-- Testes: `src/test/java` (JUnit5).
-
-Soluções implementadas (mapping para os requisitos)
 # Distributed High Throughput Rate Limiter
 
 This repository contains a Java implementation of a distributed, high-throughput
@@ -166,9 +154,3 @@ mvn test
   cost (need to sum more shard keys).
 - Use IAM roles for production deployments to provide secure CloudWatch access.
 
-## Next steps
-
-- Add a small HTTP exporter for Prometheus scraping (using simpleclient_httpserver).
-- Improve CloudWatch publisher to batch metric datum and send periodically.
-- Add unit tests for metric publishers (mock CloudWatchClient, verify metrics
-  increment Prometheus counters in registry).
