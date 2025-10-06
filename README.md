@@ -1,159 +1,203 @@
 # Distributed High Throughput Rate Limiter
 
-Projeto exemplo que implementa um rate limiter distribuído em Java, focado em alta vazão e
-escala (projeto educativo). A implementação usa uma estratégia baseada em contadores shardados
-com batching local para reduzir chamadas de rede ao armazenamento distribuído.
+This repository contains a Java implementation of a distributed, high-throughput
+rate limiter designed to run across a fleet of servers and to use an external
+`DistributedKeyValueStore` (provided as an interface) to keep global counts.
 
-## Resumo da solução
+The README below is bilingual: Português (PT-BR) followed by English (EN).
 
-- Classe principal: `DistributedHighThroughputRateLimiter`.
-- Interface de armazenamento: `DistributedKeyValueStore` (assumida como fornecida externamente).
-- Mock para testes: `MockDistributedKeyValueStore`.
-- Estratégia chave: shard de contadores + flush em lote (batch) de deltas locais.
+## Português (PT-BR)
 
-Objetivo: suportar altíssima taxa de requisições por cliente lógico (ex.: 100M/min ou mais) sem
-chamar o armazenamento distribuído em cada requisição e mantendo uma precisão eventual.
+Resumo rápido
+- Classe principal: `com.codurance.limiter.DistributedHighThroughputRateLimiter`.
+- Abstração do storage: `com.codurance.store.DistributedKeyValueStore` (método esperado
+  `CompletableFuture<Integer> incrementByAndExpire(String key, int delta, int expirationSeconds) throws Exception`).
+- Mock de testes: `com.codurance.store.MockDistributedKeyValueStore`.
+- Testes: `src/test/java` (JUnit5).
 
-## Principais características e decisões de arquitetura
+Soluções implementadas (mapping para os requisitos)
+1. Uso do `DistributedKeyValueStore` — a escrita global é feita chamando
+   `incrementByAndExpire` em chaves físicas que representam shards de uma chave
+   lógica. Isso respeita o contrato do enunciado e permite o armazenamento da
+   contagem agregada por shard.
+2. Janela fixa de 60s — a expiração padrão (configurável) é 60 segundos. A
+   implementação assume que a expiração só é aplicada quando a chave é
+   inicializada, como especificado.
+3. Exatidão relaxada — `isAllowed(String key, int limit)` é não-bloqueante e
+   usa a soma do último valor global conhecido por shard + deltas pendentes
+   locais. Isso garante alta performance e permite pequenas ultrapassagens
+   temporárias.
+4. Alto throughput — para evitar uma chamada ao `DistributedKeyValueStore` por
+   requisição, usamos:
+   - Sharding: dividir a chave lógica em N shards (`{key}#shard#{id}`) para
+     reduzir probabilidade de hot-key em um único item de storage.
+   - Batching: acumular incrementos localmente e enviar periodicamente (flush
+     por `flushIntervalMs`) na forma de `incrementByAndExpire(shardKey, delta, expirationSeconds)`.
+5. Concurrency: estruturas thread-safe (`ConcurrentHashMap`, `AtomicInteger`),
+   execução assíncrona com pool de workers e flusher agendado.
+6. Robustez: adicionamos `RetryPolicy` (tentativas com backoff) e um
+   `CircuitBreaker` simples para lidar com falhas transitórias e persistentes.
 
-1. Sharding de chaves
-   - Para evitar hot partitions no backend (por exemplo um DynamoDB/Redis/ElastiCache shard),
-     o contador lógico `clientId` é dividido em N shards (`clientId#shard#{0..N-1}`).
-   - Cada requisição incrementa localmente um shard aleatório. Ao agregar, somamos todos os
-     shards para obter o total aproximado.
+Pontos arquiteturais e princípios de Clean Code / SOLID aplicados
+- Single Responsibility (SRP): a classe `DistributedHighThroughputRateLimiter`
+  concentra coordenação de shards, buffering e decisões locais. As políticas
+  de retry e circuit breaker são separadas em classes distintas.
+- Open/Closed: o limiter usa Builder e expõe pontos de extensão para trocar a
+  estratégia de sharding, retry ou circuit-breaker sem modificar a lógica
+  central.
+- Encapsulamento: detalhes de armazenamento ficam atrás da interface
+  `DistributedKeyValueStore`.
+- Código limpo: nomes claros, builder para configuração, métodos pequenos e
+  documentação inline nas partes críticas.
 
-2. Batching local e flush periódico
-   - Requests incrementam contadores locais (em memória) e são agregados.
-   - Um flusher periódico envia deltas ao `DistributedKeyValueStore` (método `incrementByAndExpire`).
-   - Isso reduz chamadas de rede de O(RPS) para O(RPS * flushInterval / requestsPerFlush).
+Decisões de design e trade-offs (por que e custo)
+- Sharding por chave lógica
+  - Por que: mitigar hot-partitions no backend (um único contador quente).
+  - Trade-off: aumenta a cardinalidade de chaves e torna leituras globais uma
+    soma de shards, impactando custo/latência para consultas precisas.
+- Batching / Flush periódico
+  - Por que: reduzir chamadas de rede e permitir throughput muito alto.
+  - Trade-off: introduz atraso até que os deltas sejam persistidos no store e
+    permite pequenas ultrapassagens entre requisição e flush.
+- Decisão local não bloqueante para `isAllowed`
+  - Por que: necessidade de latência baixa por requisição.
+  - Trade-off: consistência eventual (aceitação de pequenas imprecisões).
+- Retries e CircuitBreaker
+  - Por que: evitar perda de contagem em falhas transitórias e proteger o
+    sistema em falhas persistentes.
+  - Trade-off: complexidade operacional aumentada e possibilidade de rebalance
+    de deltas quando o circuito fecha.
 
-3. Tolerância a imprecisão
-   - Para atender ao requisito (permitir pequenos excessos), o limite é verificado com base no
-     último valor conhecido do store + deltas locais; podem ocorrer overshoots temporários.
+Limitações conhecidas
+- Resharding dinâmico não implementado: número de shards é fixo por instância.
+- Possibilidade de perda de deltas se uma instância falhar antes do flush; o
+  `close()` tenta um flush síncrono, mas não há garantia absoluta.
+- A precisão global é aproximada; para garantias fortes (sem overshoot) seria
+  necessária uma arquitetura com coordenação forte, que reduziria throughput.
 
-4. Padrões de projeto
-   - Builder: para configurar o limiter (shards, flush interval, expiration).
-   - Strategy (extensível): a função de escolha de shard ou amostragem pode ser trocada/separada.
+Como usar (exemplo)
+```java
+DistributedKeyValueStore store = ...; // implementação externa
+try (DistributedHighThroughputRateLimiter limiter = DistributedHighThroughputRateLimiter
+        .newBuilder(store)
+        .flushIntervalMs(100)        // ajustável
+        .shards(8)                   // ajustável por carga
+        .expirationSeconds(60)       // janela fixa de 60s
+        .retryPolicy(RetryPolicy.of(3, java.time.Duration.ofMillis(50)))
+        .circuitBreaker(new CircuitBreaker(5, java.time.Duration.ofSeconds(2)))
+        .build()) {
+    boolean allowed = limiter.isAllowed("client-xyz", 500).get();
+}
+```
 
-## Escalabilidade e como atingir 1 bilhão de requisições por minuto (design conceitual)
+Como rodar os testes
+Requisitos: JDK e Maven (versão usada está definida em `pom.xml`). Note que o
+`README` original mencionava Java 11; o `pom.xml` pode declarar outra release —
+verifique `pom.xml` antes de executar.
 
-1. Distribuição de carga
-   - Deploy multi-AZ com muitos servidores (stateless). Cada servidor mantém buffers locais
-     e realiza flushs assíncronos.
-   - A divisão de shards por cliente reduz a probabilidade de hot-keys (ex.: 256 shards para
-     clientes muito calientes).
-
-2. Backend recomendado na AWS
-   - Para contadores com alto throughput e baixa latência: Amazon DynamoDB com chave particionada
-     (PK = shardKey) e operações atômicas (`UpdateItem` com ADD) + TTL em atributo.
-   - Alternativa: Amazon ElastiCache (Redis Cluster) usando INCRBY e expiração. Para persistência
-     consistente, combine com DynamoDB Streams se necessário.
-
-3. Estratégia de Sharding
-   - Aumente dinamicamente o número de shards para chaves hot (requer mapeamento e rehashing
-     externo, ou use técnicas como consistent hashing + token buckets).
-
-4. Provisionamento
-   - Para 1B req/min = ~16.7M req/s, cada servidor deve processar uma fração: por exemplo 1000
-     servidores com 16.7k req/s cada. Ajuste com autoscaling baseado em métricas (CPU, latência,
-     tamanho dos buffers, filas de flush).
-
-5. Rede
-   - Use endpoints locais (VPC endpoints) para reduzir latência entre app servers e DynamoDB/ElastiCache.
-
-6. Persistência e consistência
-   - A solução é eventual-consistent para decisões instantâneas. Para limites absolutamente rígidos,
-     precisaria de uma coordenação forte (ex.: tokens centralizados ou leaky bucket com consenso),
-     que sacrifica latência e throughput.
-
-## Segurança
-
-- Rede: use VPC, subnets privadas, security groups para limitar acesso aos backends (DynamoDB/Redis).
-- Criptografia: at-rest e in-transit para os dados do backend.
-- Autenticação e autorização: roles IAM para limitar permissões de escrita apenas às operações necessárias.
-
-## Testes incluídos
-
-- Unit tests com JUnit 5 (`src/test/java/...`) cobrindo
-  - comportamento sob limite
-  - local pending bloqueando
-  - flush batched
-  - concorrência básica
-  - testes de stress-simulado (pequeno) e edge cases
-
-## Como rodar localmente
-
-Requisitos: Java 11, Maven
-
-No diretório do projeto execute:
-
+Executar:
 ```bash
 mvn test
 ```
 
-## Testes de extremidade e stress
+Preparar ZIP para submissão
+- Incluir: `src/`, `pom.xml`, `README.md`.
+- Excluir: `target/` (binários compilados) — por exemplo:
+```bash
+zip -r submission.zip src pom.xml README.md -x "*/target/*"
+```
 
-- Testes de unidade estão no repositório e simulam o comportamento do store.
-- Para testar em escala real (stress):
-  - Crie um ambiente AWS com muitos app servers (EC2/ECS/Fargate).
-  - Use uma carga de ferramentas como Gatling ou k6 para gerar tráfego.
-  - Meça latências, throughput, tamanho dos buffers e taxa de falhas do backend.
+Notas sobre validação de requisitos de performance
+- Para provar 100M calls/min (ou mais), a estratégia é escalar horizontalmente
+  + aumentar `shards` por chaves muito quentes e ajustar `flushIntervalMs` e
+  tamanhos de worker pool.
+- Recomenda-se benchmarking com um backend real (DynamoDB/Redis) e testes de
+  carga progressiva.
 
-### Integração com CloudWatch
+## English (EN)
 
-- Publique métricas customizadas (CloudWatch) a partir dos app servers:
-  - `PendingBufferSize` por host
-  - `FlushedBatches` por minuto
-  - `StoreFailures` e `StoreRetries`
-  - `CircuitBreakerOpen` (flag)
-- Use CloudWatch Alarms para acionar autoscaling ou alertas se latência/erro subir.
+Quick summary
+- Main class: `com.codurance.limiter.DistributedHighThroughputRateLimiter`.
+- Storage abstraction: `com.codurance.store.DistributedKeyValueStore`
+  (method: `CompletableFuture<Integer> incrementByAndExpire(String key, int delta, int expirationSeconds) throws Exception`).
+- Test mock: `com.codurance.store.MockDistributedKeyValueStore`.
+- Tests: JUnit 5 in `src/test/java`.
 
-## Resiliência: Retry e Circuit Breaker
+Implemented solutions (how they satisfy the requirements)
+1. Use of `DistributedKeyValueStore` — global counts are written by calling
+   `incrementByAndExpire` on per-shard keys derived from the logical key.
+2. Fixed 60s window — default expiration is 60s (configurable). The implementation
+   respects the store behaviour that expiration is only set at key initialization.
+3. Relaxed accuracy — `isAllowed` returns immediately and computes an
+   approximation from last-known global values and pending local increments.
+4. High throughput — avoids a network call per request via sharding + batching
+   and uses a configurable flush interval and a bounded worker pool to send
+   batched deltas concurrently.
+5. Concurrency-safe — thread-safe maps and atomics are used together with a
+   background scheduled flusher and async workers.
+6. Resilience — `RetryPolicy` and `CircuitBreaker` handle transient and
+   persistent failures.
 
-- Implementado um `RetryPolicy` configurável (max attempts e backoff) para falhas transitórias ao enviar deltas.
-- Implementado um `CircuitBreaker` simples que abre após N falhas consecutivas e bloqueia chamadas por um período.
+Clean Code & SOLID considerations
+- SRP: limiter focuses on logic for buffering, sharding and local decision.
+  Retry and circuit breaker are separate classes.
+- OCP: behavior can be extended (different sharding or retry strategies) via
+  builder configuration without changing core logic.
+- Encapsulation and clear naming throughout the codebase.
 
-## Como testar bilhões de requisições sem custo
+Design choices and trade-offs
+- Sharding improves write scalability but increases key cardinality and
+  complicates accurate reads (need to sum shards).
+- Batching reduces RPCs but increases propagation latency and allows temporary
+  overshoot.
+- Local non-blocking checks keep per-request latency low but make correctness
+  eventual rather than immediate.
+- Retries and circuit breaker reduce error-induced data loss but add runtime
+  complexity.
 
-Gerar 1B req/min no mundo real é caro. Use estas estratégias para validar comportamento em escala com baixo custo:
+Limitations
+- No dynamic re-sharding; shard count is static per limiter instance.
+- Possibility of losing some pending deltas on sudden process termination; a
+  best-effort synchronous flush is attempted on `close()`.
+- The mock store does not reproduce production latencies or failure modes —
+  run integration tests against real backends to validate at scale.
 
-1. Testes de unidade e integração local (baixo custo)
-  - Simule load com muitos threads e reduza latência artificialmente no mock. Isso valida lógica de batching, retry e circuit-breaker.
+Usage example (Java)
+```java
+DistributedKeyValueStore store = ...; // external implementation
+try (DistributedHighThroughputRateLimiter limiter = DistributedHighThroughputRateLimiter
+        .newBuilder(store)
+        .flushIntervalMs(100)
+        .shards(8)
+        .expirationSeconds(60)
+        .retryPolicy(RetryPolicy.of(3, java.time.Duration.ofMillis(50)))
+        .circuitBreaker(new CircuitBreaker(5, java.time.Duration.ofSeconds(2)))
+        .build()) {
+    boolean allowed = limiter.isAllowed("client-xyz", 500).get();
+}
+```
 
-2. Testes de amostragem (scale-down)
-  - Execute um teste em menor escala (por exemplo 1M req/min) e extrapole os resultados linearmente.
-  - Meça latência por operação, CPU e uso de rede. Se a latência por operação for constante e os recursos escalam linearmente, você pode estimar o número de servidores necessários.
+Testing and verification
+- Unit tests cover local pending blocking behavior, batched flush, concurrency,
+  retries and circuit-breaker behavior. See `src/test/java/...`.
+- For performance validation, run load tests in an environment with a real
+  backend (DynamoDB/Redis). Monitor metrics like `pending buffer size`,
+  `flush rate`, `store failures` and CPU/network usage.
 
-3. Modelagem e simulação
-  - Use ferramentas de simulação (por exemplo, escrever um gerador de tráfego que apenas contabiliza eventos localmente e modela latência esperada) para estimar throughput e pontos de contenção.
+Packaging for submission
+- Ensure `target/` is excluded and include only `src/`, `pom.xml` and this
+  `README.md` in the zip.
 
-4. Testes em nuvem com recursos spot e curta duração
-  - Se precisar validar no ambiente real, use instâncias spot por curtos períodos para reduzir custo e execute testes pontuais em menor janela. Combine com DynamoDB on-demand e limites controlados.
-
-5. Benchmarking por componente
-  - Meça latência do backend (DynamoDB/Redis) separadamente para determinar o quanto cada flush custa.
-
-6. Observability + extrapolação
-  - Colete métricas (via CloudWatch) enquanto escala um pequeno número de servidores e extrapole até o alvo de 1B/min.
-
-
-## Limitações
-
-- A contagem é apenas aproximada. Picadas temporárias acima do limite são permitidas.
-- Hot keys: a estratégia de shard ajuda, mas demanda planejamento de número de shards e
-  possivelmente re-sharding dinâmico para clientes muito quentes.
-- O mock store não replica latência e falhas do mundo real — recomenda-se um teste com
-  um DynamoDB/Redis real para validar comportamento sob carga.
-
-## Próximos passos / extensões possíveis
-
-- Implementar resharding/hot-key detection automático.
-- Melhorar a garantia de flush durante shutdown (flush síncrono final ).
-- Instrumentação (Prometheus + Grafana) para métricas: pending size, flush rate, failures.
-- Mecanismo de fallback quando o backend estiver indisponível (circuit breaker + retry com backoff).
+Next steps and optional improvements
+- Automatic hot-key detection and dynamic re-sharding.
+- Prometheus metrics export and Grafana dashboards for observability.
+- Integration tests against real storage backends with scalable setups.
+- Improved shutdown protocol to reliably persist pending deltas (draining
+  strategy with handoff to a sibling instance).
 
 ---
 
-Este README resume o projeto, escolhas e caminhos para escala/segurança. Se desejar, posso
-gerar um pacote zip com somente o código fonte pronto para submissão ou expandir os testes
-de stress com scripts de carga. 
+If you want I can:
+- Produce the submission zip with only source files (remove `target/`).
+- Add a small load generator/scenario to help evaluate throughput locally.
+- Add Prometheus metrics and a small dashboard example.
