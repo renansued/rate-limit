@@ -14,6 +14,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import com.codurance.store.DistributedKeyValueStore;
 import com.codurance.limiter.reliability.RetryPolicy;
 import com.codurance.limiter.reliability.CircuitBreaker;
+import com.codurance.limiter.metrics.MetricPublisher;
+import com.codurance.limiter.metrics.NoOpMetricPublisher;
 
 /**
  * Distributed high-throughput rate limiter (sharded counters + batching).
@@ -54,14 +56,16 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
   private final RetryPolicy retryPolicy;
   private final CircuitBreaker circuitBreaker;
   private final ExecutorService workerPool;
+  private final MetricPublisher metricPublisher;
 
   private DistributedHighThroughputRateLimiter(Builder builder) {
     this.store = Objects.requireNonNull(builder.store, "store");
     this.flushIntervalMs = builder.flushIntervalMs;
     this.shards = builder.shards;
     this.expirationSeconds = builder.expirationSeconds;
-    this.retryPolicy = builder.retryPolicy;
-    this.circuitBreaker = builder.circuitBreaker;
+  this.retryPolicy = builder.retryPolicy;
+  this.circuitBreaker = builder.circuitBreaker;
+  this.metricPublisher = builder.metricPublisher == null ? new NoOpMetricPublisher() : builder.metricPublisher;
 
     this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
       Thread t = new Thread(r, "rate-limiter-flusher");
@@ -167,10 +171,18 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
               ai.set(val);
               return ai;
             });
+            // metrics: flushed batch
+            flushedBatches.incrementAndGet();
+            metricPublisher.incrementCounter("FlushedBatches", 1);
             break;
           } catch (Throwable ex) {
             if (circuitBreaker != null)
               circuitBreaker.recordFailure();
+            metricPublisher.incrementCounter("StoreFailures", 1);
+            // reflect circuit breaker state
+            if (circuitBreaker != null)
+              metricPublisher.gauge("CircuitBreakerOpen", circuitBreaker.allowRequest() ? 0 : 1);
+
             if (rp != null && attempts < rp.getMaxAttempts()) {
               try {
                 Thread.sleep(rp.getBackoff().toMillis());
@@ -190,7 +202,13 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
         }
       });
 
-      flushedBatches.incrementAndGet();
+    }
+    // emit pending buffer size metric (approx)
+    try {
+      int totalPending = pending.values().stream().mapToInt(AtomicInteger::get).sum();
+      metricPublisher.gauge("PendingBufferSize", totalPending);
+    } catch (Throwable t) {
+      // ignore metrics failures
     }
   }
 
@@ -297,6 +315,7 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
     private RetryPolicy retryPolicy = null;
     private CircuitBreaker circuitBreaker = null;
     private int workerPoolSize = 8;
+  private MetricPublisher metricPublisher = null;
 
     public Builder(DistributedKeyValueStore store) {
       this.store = store;
@@ -329,6 +348,11 @@ public class DistributedHighThroughputRateLimiter implements AutoCloseable {
 
     public DistributedHighThroughputRateLimiter build() {
       return new DistributedHighThroughputRateLimiter(this);
+    }
+
+    public Builder metricPublisher(MetricPublisher mp) {
+      this.metricPublisher = mp;
+      return this;
     }
 
     public Builder workerPoolSize(int size) {
